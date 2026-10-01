@@ -276,6 +276,7 @@ from open_webui.utils.tool_approval import (
     resolve_tool_call_output,
 )
 from open_webui.utils.tools import set_terminal_servers, set_tool_servers
+from open_webui.utils.user_picker import public_user_picker
 
 if SAFE_MODE:
     print('SAFE MODE ENABLED')
@@ -2259,6 +2260,8 @@ async def get_app_config(request: Request):
         'ldap.enable',
         'ui.enable_signup',
         'ui.enable_login_form',
+        'ui.user_picker.enable',
+        'ui.user_picker.users',
         'auth.enable_api_keys',
         'ui.enable_password_change_form',
         'direct.enable',
@@ -2324,6 +2327,12 @@ async def get_app_config(request: Request):
             ),
             'auto_redirect': config.get('oauth.auto_redirect'),
         },
+        # Explicit login picker for trusted/local deployments. Disabled by
+        # default. When off, configured accounts are not included in this response.
+        'user_picker': public_user_picker(
+            config.get('ui.user_picker.enable'),
+            config.get('ui.user_picker.users'),
+        ),
         'features': {
             'slim': USE_SLIM,
             # --- Public: required by login/signup page pre-auth ---

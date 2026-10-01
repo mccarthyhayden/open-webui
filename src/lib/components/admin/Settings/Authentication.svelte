@@ -22,6 +22,8 @@
 	import AdminSettingRow from './AdminSettingRow.svelte';
 	import AdminSettingSection from './AdminSettingSection.svelte';
 	import SettingsSelect from '$lib/components/common/SettingsSelect.svelte';
+	import Plus from '$lib/components/icons/Plus.svelte';
+	import XMark from '$lib/components/icons/XMark.svelte';
 
 	const i18n: any = getContext('i18n');
 
@@ -86,8 +88,47 @@
 		return !!res;
 	};
 
+	const addPickerUser = () => {
+		adminConfig.USER_PICKER_USERS = [
+			...(adminConfig.USER_PICKER_USERS ?? []),
+			{ _key: crypto.randomUUID(), name: '', email: '', profile_image_url: '' }
+		];
+	};
+
+	const removePickerUser = (index) => {
+		adminConfig.USER_PICKER_USERS = adminConfig.USER_PICKER_USERS.filter((_, idx) => idx !== index);
+	};
+
+	// Blank rows are dropped. Incomplete rows are rejected before save so the
+	// explicit picker list stays limited to name, email, and an optional avatar.
+	const pickerUsersForSave = () => {
+		const users = (adminConfig.USER_PICKER_USERS ?? [])
+			.map((pickerUser) => ({
+				name: `${pickerUser?.name ?? ''}`.trim(),
+				email: `${pickerUser?.email ?? ''}`.trim(),
+				profile_image_url: `${pickerUser?.profile_image_url ?? ''}`.trim()
+			}))
+			.filter((pickerUser) => pickerUser.name || pickerUser.email || pickerUser.profile_image_url);
+
+		if (users.some((pickerUser) => !pickerUser.name || !pickerUser.email)) {
+			toast.error($i18n.t('Each user picker entry needs a display name and email.'));
+			return null;
+		}
+
+		const emails = users.map((pickerUser) => pickerUser.email.toLowerCase());
+		if (new Set(emails).size !== emails.length) {
+			toast.error($i18n.t('User picker emails must be unique.'));
+			return null;
+		}
+
+		return users;
+	};
+
 	const updateAdminHandler = async () => {
 		if (!adminConfig) return true;
+		const pickerUsers = pickerUsersForSave();
+		if (!pickerUsers) return false;
+		adminConfig.USER_PICKER_USERS = pickerUsers;
 		const res = await updateAdminConfig(localStorage.token, adminConfig).catch((error) => {
 			toast.error(`${error}`);
 			return null;
@@ -110,6 +151,15 @@
 		await Promise.all([
 			(async () => {
 				adminConfig = await getAdminConfig(localStorage.token);
+				adminConfig.ENABLE_USER_PICKER_LOGIN = !!adminConfig.ENABLE_USER_PICKER_LOGIN;
+				adminConfig.USER_PICKER_USERS = Array.isArray(adminConfig.USER_PICKER_USERS)
+					? adminConfig.USER_PICKER_USERS.map((pickerUser) => ({
+							_key: crypto.randomUUID(),
+							name: pickerUser?.name ?? '',
+							email: pickerUser?.email ?? '',
+							profile_image_url: pickerUser?.profile_image_url ?? ''
+						}))
+					: [];
 			})(),
 			(async () => {
 				groups = await getGroups(localStorage.token);
@@ -176,6 +226,83 @@
 				>
 					<Switch bind:state={adminConfig.ENABLE_LOGIN_FORM} ariaLabelledbyId={labelId} />
 				</AdminSettingRow>
+
+				<AdminSettingRow
+					label={$i18n.t('settings.admin.authentication.userPicker.label')}
+					description={$i18n.t('settings.admin.authentication.userPicker.description')}
+					let:labelId
+				>
+					<Switch bind:state={adminConfig.ENABLE_USER_PICKER_LOGIN} ariaLabelledbyId={labelId} />
+				</AdminSettingRow>
+
+				{#if adminConfig.ENABLE_USER_PICKER_LOGIN}
+					<div>
+						<div class="mb-1 flex min-h-7 items-center justify-between gap-2">
+							<div class="min-w-0 text-xs text-gray-600 dark:text-gray-400">
+								{$i18n.t('settings.admin.authentication.userPickerUsers.label')}
+							</div>
+							<button
+								class="flex size-6 items-center justify-center text-gray-400 dark:text-gray-600"
+								type="button"
+								aria-label={$i18n.t('settings.admin.authentication.userPickerAdd.label')}
+								on:click={addPickerUser}
+							>
+								<Plus className="size-4" />
+							</button>
+						</div>
+						<p class="mb-2 text-[0.6875rem] text-gray-400 dark:text-gray-600">
+							{$i18n.t('settings.admin.authentication.userPickerUsers.description')}
+						</p>
+						<div class="flex flex-col gap-1.5">
+							{#each adminConfig.USER_PICKER_USERS as pickerUser, pickerUserIdx (pickerUser._key)}
+								<div
+									class="flex flex-col gap-1.5 rounded-lg border border-gray-100/40 px-2 py-2 dark:border-gray-850/50"
+								>
+									<div class="flex items-center gap-1">
+										<input
+											class={inputClass}
+											type="text"
+											required
+											autocomplete="off"
+											placeholder={$i18n.t(
+												'settings.admin.authentication.userPickerDisplayName.label'
+											)}
+											aria-label={$i18n.t(
+												'settings.admin.authentication.userPickerDisplayName.label'
+											)}
+											bind:value={pickerUser.name}
+										/>
+										<button
+											class="flex size-6 shrink-0 items-center justify-center text-gray-400 hover:text-gray-700 dark:text-gray-600 dark:hover:text-gray-300"
+											type="button"
+											aria-label={$i18n.t('Delete')}
+											on:click={() => removePickerUser(pickerUserIdx)}
+										>
+											<XMark className="size-3.5" />
+										</button>
+									</div>
+									<input
+										class={inputClass}
+										type="text"
+										required
+										autocomplete="off"
+										placeholder={$i18n.t('settings.admin.authentication.userPickerEmail.label')}
+										aria-label={$i18n.t('settings.admin.authentication.userPickerEmail.label')}
+										bind:value={pickerUser.email}
+									/>
+									<input
+										class={inputClass}
+										type="text"
+										autocomplete="off"
+										placeholder={$i18n.t('settings.admin.authentication.userPickerAvatar.label')}
+										aria-label={$i18n.t('settings.admin.authentication.userPickerAvatar.label')}
+										bind:value={pickerUser.profile_image_url}
+									/>
+								</div>
+							{/each}
+						</div>
+					</div>
+				{/if}
 
 				<AdminSettingRow
 					label={$i18n.t('settings.admin.authentication.newSignUps.label')}

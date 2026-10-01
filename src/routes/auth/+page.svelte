@@ -4,7 +4,7 @@
 
 	import { toast } from 'svelte-sonner';
 
-	import { onMount, getContext } from 'svelte';
+	import { onMount, getContext, tick } from 'svelte';
 	import { goto } from '$app/navigation';
 	import { page } from '$app/stores';
 
@@ -43,6 +43,71 @@
 	let ldapUsername = '';
 
 	let submitting = false;
+
+	// User Picker Login is optional and for trusted or local deployments.
+	// Selecting a person only fills their email. Password sign-in is unchanged.
+	let selectedPickerUser = null;
+	let preferEmailLogin = false;
+
+	$: pickerUsers = $config?.user_picker?.enable ? ($config?.user_picker?.users ?? []) : [];
+	$: userPickerActive =
+		mode === 'signin' && !($config?.onboarding ?? false) && pickerUsers.length > 0;
+	$: showUserPicker = userPickerActive && !selectedPickerUser && !preferEmailLogin;
+	$: showPickerPassword = userPickerActive && !!selectedPickerUser && !preferEmailLogin;
+	$: showCredentialForm =
+		showPickerPassword ||
+		(!showUserPicker &&
+			(!!$config?.features.enable_login_form || !!$config?.features.enable_ldap || !!form));
+
+	const pickerAvatar = (pickerUser) => {
+		if (pickerUser?.profile_image_url) {
+			return pickerUser.profile_image_url;
+		}
+		return generateInitialsImage(pickerUser?.name || '?');
+	};
+
+	const pickerAvatarFallback = (event, pickerUser) => {
+		const image = event.currentTarget;
+		if (!image || image.dataset.fallback === 'true') {
+			return;
+		}
+		image.dataset.fallback = 'true';
+		image.src = generateInitialsImage(pickerUser?.name || '?');
+	};
+
+	const selectPickerUser = async (pickerUser) => {
+		selectedPickerUser = pickerUser;
+		email = pickerUser?.email ?? '';
+		password = '';
+		preferEmailLogin = false;
+		await tick();
+		document.getElementById('password')?.focus();
+	};
+
+	const changePickerUser = () => {
+		selectedPickerUser = null;
+		email = '';
+		password = '';
+	};
+
+	const useEmailLogin = () => {
+		preferEmailLogin = true;
+		selectedPickerUser = null;
+		email = '';
+		password = '';
+	};
+
+	const usePickerLogin = () => {
+		preferEmailLogin = false;
+		selectedPickerUser = null;
+		email = '';
+		password = '';
+	};
+
+	$: if (mode !== 'signin') {
+		selectedPickerUser = null;
+		preferEmailLogin = false;
+	}
 
 	const setSessionUser = async (sessionUser, redirectPath: string | null = null) => {
 		if (sessionUser) {
@@ -267,6 +332,9 @@
 								class=" flex flex-col justify-center"
 								on:submit={(e) => {
 									e.preventDefault();
+									if (showUserPicker) {
+										return;
+									}
 									submitHandler();
 								}}
 							>
@@ -274,6 +342,8 @@
 									<div class=" text-2xl font-normal">
 										{#if $config?.onboarding ?? false}
 											{$i18n.t(`Get started with {{WEBUI_NAME}}`, { WEBUI_NAME: $WEBUI_NAME })}
+										{:else if showUserPicker}
+											{$i18n.t('Select a user')}
 										{:else if mode === 'ldap'}
 											{$i18n.t(`Sign in to {{WEBUI_NAME}} with LDAP`, { WEBUI_NAME: $WEBUI_NAME })}
 										{:else if mode === 'signin'}
@@ -293,7 +363,56 @@
 									{/if}
 								</div>
 
-								{#if $config?.features.enable_login_form || $config?.features.enable_ldap || form}
+								{#if showUserPicker}
+									<ul class="mt-4 flex list-none flex-col gap-2 p-0">
+										{#each pickerUsers as pickerUser (pickerUser.email)}
+											<li>
+												<button
+													class="flex w-full items-center gap-3 rounded-2xl bg-gray-700/5 px-4 py-3 text-left transition hover:bg-gray-700/10 dark:bg-gray-100/5 dark:hover:bg-gray-100/10"
+													type="button"
+													on:click={() => selectPickerUser(pickerUser)}
+												>
+													<img
+														src={pickerAvatar(pickerUser)}
+														alt=""
+														class="size-10 shrink-0 rounded-full object-cover"
+														on:error={(event) => pickerAvatarFallback(event, pickerUser)}
+													/>
+													<span
+														class="min-w-0 truncate text-sm text-gray-900 dark:text-gray-100"
+													>
+														{pickerUser.name}
+													</span>
+												</button>
+											</li>
+										{/each}
+									</ul>
+									{#if $config?.features.enable_login_form}
+										<button
+											class="mt-4 text-sm underline"
+											type="button"
+											on:click={useEmailLogin}
+										>
+											{$i18n.t('Use email instead')}
+										</button>
+									{/if}
+									{#if $config?.features.enable_login_form && $config?.features.enable_signup && !($config?.onboarding ?? false)}
+										<div class="mt-4 text-sm text-center">
+											{$i18n.t("Don't have an account?")}
+											<button
+												class="font-normal underline"
+												type="button"
+												on:click={() => {
+													mode = 'signup';
+												}}
+											>
+												{$i18n.t('Sign up')}
+											</button>
+										</div>
+									{/if}
+								{/if}
+
+								{#if showCredentialForm}
 									<div class="flex flex-col mt-4">
 										{#if mode === 'signup'}
 											<div class="mb-2">
@@ -326,6 +445,27 @@
 													id="username"
 													placeholder={$i18n.t('Enter Your Username')}
 													required
+												/>
+											</div>
+										{:else if showPickerPassword && selectedPickerUser}
+											<div class="mb-4 flex flex-col items-center">
+												<img
+													src={pickerAvatar(selectedPickerUser)}
+													alt=""
+													class="size-16 rounded-full object-cover"
+													on:error={(event) => pickerAvatarFallback(event, selectedPickerUser)}
+												/>
+												<div class="mt-3 text-base text-gray-900 dark:text-gray-100">
+													{selectedPickerUser.name}
+												</div>
+												<input
+													class="sr-only"
+													type="email"
+													autocomplete="username"
+													value={email}
+													tabindex="-1"
+													readonly
+													aria-hidden="true"
 												/>
 											</div>
 										{:else}
@@ -386,7 +526,7 @@
 									</div>
 								{/if}
 								<div class="mt-5">
-									{#if $config?.features.enable_login_form || $config?.features.enable_ldap || form}
+									{#if showCredentialForm}
 										{#if mode === 'ldap'}
 											<button
 												class="bg-gray-700/5 hover:bg-gray-700/10 dark:bg-gray-100/5 dark:hover:bg-gray-100/10 dark:text-gray-300 dark:hover:text-white transition w-full rounded-full font-normal text-sm py-2.5 disabled:opacity-50 flex justify-center"
@@ -422,6 +562,24 @@
 												{/if}
 											</button>
 
+											{#if showPickerPassword}
+												<button
+													class="mt-4 text-sm underline"
+													type="button"
+													on:click={changePickerUser}
+												>
+													{$i18n.t('Change user')}
+												</button>
+											{:else if preferEmailLogin && userPickerActive}
+												<button
+													class="mt-4 text-sm underline"
+													type="button"
+													on:click={usePickerLogin}
+												>
+													{$i18n.t('Select a user')}
+												</button>
+											{/if}
+
 											{#if $config?.features.enable_signup && !($config?.onboarding ?? false)}
 												<div class=" mt-4 text-sm text-center">
 													{mode === 'signin'
@@ -433,6 +591,11 @@
 														type="button"
 														on:click={() => {
 															if (mode === 'signin') {
+																if (showPickerPassword) {
+																	email = '';
+																	password = '';
+																	selectedPickerUser = null;
+																}
 																mode = 'signup';
 															} else {
 																mode = 'signin';
@@ -451,7 +614,7 @@
 							{#if Object.keys($config?.oauth?.providers ?? {}).length > 0}
 								<div class="inline-flex items-center justify-center w-full">
 									<hr class="w-32 h-px my-4 border-0 dark:bg-gray-100/10 bg-gray-700/10" />
-									{#if $config?.features.enable_login_form || $config?.features.enable_ldap || form}
+									{#if showCredentialForm || showUserPicker}
 										<span
 											class="px-3 text-sm font-normal text-gray-900 dark:text-white bg-transparent"
 											>{$i18n.t('or')}</span
@@ -586,7 +749,7 @@
 								</div>
 							{/if}
 
-							{#if $config?.features.enable_ldap && $config?.features.enable_login_form}
+							{#if $config?.features.enable_ldap && ($config?.features.enable_login_form || userPickerActive)}
 								<div class="mt-2">
 									<button
 										class="flex justify-center items-center text-xs w-full text-center underline"
