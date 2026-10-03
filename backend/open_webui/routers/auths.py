@@ -1282,8 +1282,52 @@ class AdminConfig(BaseModel):
         return cleaned
 
 
+async def sign_in_would_be_unavailable(form_data: AdminConfig) -> bool:
+    """Reject a save that would leave no way to sign in.
+
+    Email login can be turned off when User Picker Login has accounts, or when
+    SSO, LDAP, or trusted-header auth is already available.
+    """
+    if not WEBUI_AUTH or WEBUI_AUTH_TRUSTED_EMAIL_HEADER:
+        return False
+
+    if 'ENABLE_LOGIN_FORM' in form_data.model_fields_set:
+        login_form = form_data.ENABLE_LOGIN_FORM
+    else:
+        login_form = bool(await Config.get('ui.enable_login_form'))
+    if login_form:
+        return False
+
+    if 'ENABLE_USER_PICKER_LOGIN' in form_data.model_fields_set:
+        picker_enabled = bool(form_data.ENABLE_USER_PICKER_LOGIN)
+    else:
+        picker_enabled = bool(await Config.get('ui.user_picker.enable'))
+
+    if 'USER_PICKER_USERS' in form_data.model_fields_set:
+        picker_users = form_data.USER_PICKER_USERS or []
+    else:
+        picker_users = normalize_user_picker_users(await Config.get('ui.user_picker.users'))
+
+    if picker_enabled and picker_users:
+        return False
+    if await Config.get('ldap.enable'):
+        return False
+    if await Config.get('oauth.enable'):
+        return False
+    return True
+
+
 @router.post('/admin/config')
 async def update_admin_config(request: Request, form_data: AdminConfig, user=Depends(get_admin_user)):
+    if await sign_in_would_be_unavailable(form_data):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=(
+                'Leave the login form on until User Picker Login has at least one person, '
+                'or turn on SSO or LDAP first.'
+            ),
+        )
+
     updates = config_updates(form_data.model_dump(), ADMIN_CONFIG_KEYS)
     if 'ENABLE_LOGIN_FORM' not in form_data.model_fields_set:
         updates.pop('ui.enable_login_form', None)

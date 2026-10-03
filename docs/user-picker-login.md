@@ -19,6 +19,8 @@ Do not enable this on a public server if the login page should not reveal which 
 
 Leave the list empty to keep the normal login form even if the switch is on. People can still choose **Use email instead** when the regular login form is enabled.
 
+The login form cannot be turned off unless someone can still sign in. That means User Picker Login is on and has at least one person, or SSO, LDAP, or trusted-header sign-in is already enabled. This avoids locking the instance with no way back in.
+
 Environment variables set the initial values. Admin settings override them when persistent config is enabled:
 
 - `ENABLE_USER_PICKER_LOGIN` — `False` by default
