@@ -16,12 +16,16 @@
 	import Textarea from '$lib/components/common/Textarea.svelte';
 	import Tooltip from '$lib/components/common/Tooltip.svelte';
 	import { config } from '$lib/stores';
-	import { getContext, onMount } from 'svelte';
+	import { getContext, onMount, tick } from 'svelte';
 	import { toast } from 'svelte-sonner';
+	import { v4 as uuidv4 } from 'uuid';
 	import AdminSettingField from './AdminSettingField.svelte';
 	import AdminSettingRow from './AdminSettingRow.svelte';
 	import AdminSettingSection from './AdminSettingSection.svelte';
 	import SettingsSelect from '$lib/components/common/SettingsSelect.svelte';
+	import Modal from '$lib/components/common/Modal.svelte';
+	import Plus from '$lib/components/icons/Plus.svelte';
+	import XMark from '$lib/components/icons/XMark.svelte';
 
 	const i18n: any = getContext('i18n');
 
@@ -86,8 +90,136 @@
 		return !!res;
 	};
 
+	let showPickerUserModal = false;
+	let pickerUserDraft = { _key: '', name: '', email: '', profile_image_url: '' };
+
+	const blankPickerUser = () => ({
+		_key: uuidv4(),
+		name: '',
+		email: '',
+		profile_image_url: ''
+	});
+
+	const openAddPickerUser = () => {
+		pickerUserDraft = blankPickerUser();
+		showPickerUserModal = true;
+	};
+
+	const openEditPickerUser = (pickerUser) => {
+		pickerUserDraft = {
+			_key: pickerUser._key,
+			name: pickerUser.name ?? '',
+			email: pickerUser.email ?? '',
+			profile_image_url: pickerUser.profile_image_url ?? ''
+		};
+		showPickerUserModal = true;
+	};
+
+	const setPickerUsers = (users) => {
+		adminConfig = { ...adminConfig, USER_PICKER_USERS: users };
+	};
+
+	// True when saving would leave the login page with no password form, no picker
+	// accounts, and no SSO, LDAP, or trusted-header sign-in.
+	const signInWouldBeLockedOut = ({
+		loginForm = adminConfig?.ENABLE_LOGIN_FORM,
+		pickerEnabled = adminConfig?.ENABLE_USER_PICKER_LOGIN,
+		pickerUsers = adminConfig?.USER_PICKER_USERS
+	} = {}) => {
+		if ($config?.features?.auth === false || $config?.features?.auth_trusted_header) return false;
+		if (loginForm) return false;
+		const ready = (pickerUsers ?? []).filter(
+			(pickerUser) => `${pickerUser?.name ?? ''}`.trim() && `${pickerUser?.email ?? ''}`.trim()
+		);
+		if (pickerEnabled && ready.length > 0) return false;
+		if (ENABLE_LDAP || oauthConfig?.ENABLE_OAUTH) return false;
+		return true;
+	};
+
+	const lockoutMessage = () =>
+		$i18n.t(
+			'Leave the login form on until User Picker Login has at least one person, or turn on SSO or LDAP first.'
+		);
+
+	const removePickerUser = (index) => {
+		const next = adminConfig.USER_PICKER_USERS.filter((_, idx) => idx !== index);
+		if (signInWouldBeLockedOut({ pickerUsers: next })) {
+			toast.error(lockoutMessage());
+			return;
+		}
+		setPickerUsers(next);
+	};
+
+	const savePickerUserDraft = () => {
+		const name = pickerUserDraft.name.trim();
+		const email = pickerUserDraft.email.trim();
+		const profileImageUrl = pickerUserDraft.profile_image_url.trim();
+		if (!name || !email) {
+			toast.error($i18n.t('Each user picker entry needs a display name and email.'));
+			return;
+		}
+
+		const others = (adminConfig.USER_PICKER_USERS ?? []).filter(
+			(pickerUser) => pickerUser._key !== pickerUserDraft._key
+		);
+		if (others.some((pickerUser) => pickerUser.email.trim().toLowerCase() === email.toLowerCase())) {
+			toast.error($i18n.t('User picker emails must be unique.'));
+			return;
+		}
+
+		const nextUser = {
+			_key: pickerUserDraft._key || uuidv4(),
+			name,
+			email,
+			profile_image_url: profileImageUrl
+		};
+		const exists = (adminConfig.USER_PICKER_USERS ?? []).some(
+			(pickerUser) => pickerUser._key === nextUser._key
+		);
+		setPickerUsers(
+			exists
+				? adminConfig.USER_PICKER_USERS.map((pickerUser) =>
+						pickerUser._key === nextUser._key ? nextUser : pickerUser
+					)
+				: [...(adminConfig.USER_PICKER_USERS ?? []), nextUser]
+		);
+		showPickerUserModal = false;
+	};
+
+	// Blank rows are dropped. Incomplete rows are rejected before save so the
+	// explicit picker list stays limited to name, email, and an optional avatar.
+	const pickerUsersForSave = () => {
+		const users = (adminConfig.USER_PICKER_USERS ?? [])
+			.map((pickerUser) => ({
+				name: `${pickerUser?.name ?? ''}`.trim(),
+				email: `${pickerUser?.email ?? ''}`.trim(),
+				profile_image_url: `${pickerUser?.profile_image_url ?? ''}`.trim()
+			}))
+			.filter((pickerUser) => pickerUser.name || pickerUser.email || pickerUser.profile_image_url);
+
+		if (users.some((pickerUser) => !pickerUser.name || !pickerUser.email)) {
+			toast.error($i18n.t('Each user picker entry needs a display name and email.'));
+			return null;
+		}
+
+		const emails = users.map((pickerUser) => pickerUser.email.toLowerCase());
+		if (new Set(emails).size !== emails.length) {
+			toast.error($i18n.t('User picker emails must be unique.'));
+			return null;
+		}
+
+		return users;
+	};
+
 	const updateAdminHandler = async () => {
 		if (!adminConfig) return true;
+		const pickerUsers = pickerUsersForSave();
+		if (!pickerUsers) return false;
+		if (signInWouldBeLockedOut({ pickerUsers })) {
+			toast.error(lockoutMessage());
+			return false;
+		}
+		adminConfig.USER_PICKER_USERS = pickerUsers;
 		const res = await updateAdminConfig(localStorage.token, adminConfig).catch((error) => {
 			toast.error(`${error}`);
 			return null;
@@ -96,9 +228,14 @@
 	};
 
 	const submitHandler = async () => {
-		const adminSaved = await updateAdminHandler();
+		if (adminConfig && signInWouldBeLockedOut()) {
+			toast.error(lockoutMessage());
+			return;
+		}
+		// Save SSO and LDAP first so the login-form check can see them.
 		const ldapSaved = await updateLdapServerHandler();
 		const oauthSaved = await updateOAuthHandler();
+		const adminSaved = await updateAdminHandler();
 
 		if (adminSaved && ldapSaved && oauthSaved) {
 			toast.success($i18n.t('Settings saved successfully!'));
@@ -110,6 +247,15 @@
 		await Promise.all([
 			(async () => {
 				adminConfig = await getAdminConfig(localStorage.token);
+				adminConfig.ENABLE_USER_PICKER_LOGIN = !!adminConfig.ENABLE_USER_PICKER_LOGIN;
+				adminConfig.USER_PICKER_USERS = Array.isArray(adminConfig.USER_PICKER_USERS)
+					? adminConfig.USER_PICKER_USERS.map((pickerUser) => ({
+							_key: uuidv4(),
+							name: pickerUser?.name ?? '',
+							email: pickerUser?.email ?? '',
+							profile_image_url: pickerUser?.profile_image_url ?? ''
+						}))
+					: [];
 			})(),
 			(async () => {
 				groups = await getGroups(localStorage.token);
@@ -174,8 +320,90 @@
 					description={$i18n.t('settings.admin.authentication.loginForm.description')}
 					let:labelId
 				>
-					<Switch bind:state={adminConfig.ENABLE_LOGIN_FORM} ariaLabelledbyId={labelId} />
+					<Switch
+						bind:state={adminConfig.ENABLE_LOGIN_FORM}
+						ariaLabelledbyId={labelId}
+						on:change={async (event) => {
+							if (event.detail === false && signInWouldBeLockedOut()) {
+								await tick();
+								adminConfig.ENABLE_LOGIN_FORM = true;
+								toast.error(lockoutMessage());
+							}
+						}}
+					/>
 				</AdminSettingRow>
+
+				<AdminSettingRow
+					label={$i18n.t('settings.admin.authentication.userPicker.label')}
+					description={$i18n.t('settings.admin.authentication.userPicker.description')}
+					let:labelId
+				>
+					<Switch
+						bind:state={adminConfig.ENABLE_USER_PICKER_LOGIN}
+						ariaLabelledbyId={labelId}
+						on:change={async (event) => {
+							if (event.detail === false && signInWouldBeLockedOut()) {
+								await tick();
+								adminConfig.ENABLE_USER_PICKER_LOGIN = true;
+								toast.error(lockoutMessage());
+							}
+						}}
+					/>
+				</AdminSettingRow>
+
+				{#if adminConfig.ENABLE_USER_PICKER_LOGIN}
+					<div>
+						<div class="mb-1 flex min-h-7 items-center justify-between gap-2">
+							<div class="min-w-0 text-xs text-gray-600 dark:text-gray-400">
+								{$i18n.t('settings.admin.authentication.userPickerUsers.label')}
+							</div>
+							<button
+								class="flex size-6 cursor-pointer items-center justify-center text-gray-400 hover:text-gray-700 dark:text-gray-600 dark:hover:text-gray-300"
+								type="button"
+								aria-label={$i18n.t('settings.admin.authentication.userPickerAdd.label')}
+								on:click|stopPropagation={openAddPickerUser}
+							>
+								<Plus className="size-4" />
+							</button>
+						</div>
+						<p class="mb-2 text-[0.6875rem] text-gray-400 dark:text-gray-600">
+							{$i18n.t('settings.admin.authentication.userPickerUsers.description')}
+						</p>
+						{#if adminConfig.USER_PICKER_USERS.length === 0}
+							<p class="text-[0.6875rem] text-gray-400 dark:text-gray-600">
+								{$i18n.t('No accounts yet. Use + to add someone to the login page.')}
+							</p>
+						{/if}
+						<div class="flex flex-col gap-1.5">
+							{#each adminConfig.USER_PICKER_USERS as pickerUser, pickerUserIdx (pickerUser._key)}
+								<div
+									class="flex items-center gap-2 rounded-lg border border-gray-100/40 px-2 py-1.5 dark:border-gray-850/50"
+								>
+									<button
+										class="min-w-0 flex-1 text-left"
+										type="button"
+										on:click={() => openEditPickerUser(pickerUser)}
+									>
+										<div class="truncate text-xs text-gray-700 dark:text-gray-200">
+											{pickerUser.name}
+										</div>
+										<div class="truncate text-[0.6875rem] text-gray-400 dark:text-gray-500">
+											{pickerUser.email}
+										</div>
+									</button>
+									<button
+										class="flex size-6 shrink-0 items-center justify-center text-gray-400 hover:text-gray-700 dark:text-gray-600 dark:hover:text-gray-300"
+										type="button"
+										aria-label={$i18n.t('Delete')}
+										on:click={() => removePickerUser(pickerUserIdx)}
+									>
+										<XMark className="size-3.5" />
+									</button>
+								</div>
+							{/each}
+						</div>
+					</div>
+				{/if}
 
 				<AdminSettingRow
 					label={$i18n.t('settings.admin.authentication.newSignUps.label')}
@@ -885,3 +1113,87 @@
 		</button>
 	</div>
 </form>
+
+<Modal bind:show={showPickerUserModal} size="sm">
+	<div
+		class="px-5 py-4 text-gray-700 dark:text-gray-200"
+		on:keydown={(event) => {
+			if (event.key === 'Enter' && !(event.target instanceof HTMLButtonElement)) {
+				event.preventDefault();
+				savePickerUserDraft();
+			}
+		}}
+	>
+		<div class="mb-3 flex items-center justify-between">
+			<div class="text-sm font-medium">
+				{$i18n.t('settings.admin.authentication.userPickerAdd.label')}
+			</div>
+			<button
+				class="rounded-lg p-1 text-gray-500 transition hover:bg-gray-50 hover:text-gray-700 dark:text-gray-400 dark:hover:bg-gray-800 dark:hover:text-gray-200"
+				type="button"
+				aria-label={$i18n.t('Close')}
+				on:click={() => {
+					showPickerUserModal = false;
+				}}
+			>
+				<XMark className="size-4" />
+			</button>
+		</div>
+		<p class="mb-3 text-xs text-gray-500 dark:text-gray-400">
+			{$i18n.t(
+				'This person will appear on the login page. They still need their password to sign in.'
+			)}
+		</p>
+		<div class="flex flex-col gap-2">
+			<label class="text-xs text-gray-500" for="picker-user-name">
+				{$i18n.t('settings.admin.authentication.userPickerDisplayName.label')}
+			</label>
+			<input
+				id="picker-user-name"
+				class="w-full rounded-lg border border-gray-100/50 bg-transparent px-2 py-1.5 text-sm outline-hidden dark:border-white/10"
+				type="text"
+				autocomplete="off"
+				bind:value={pickerUserDraft.name}
+			/>
+			<label class="text-xs text-gray-500" for="picker-user-email">
+				{$i18n.t('settings.admin.authentication.userPickerEmail.label')}
+			</label>
+			<input
+				id="picker-user-email"
+				class="w-full rounded-lg border border-gray-100/50 bg-transparent px-2 py-1.5 text-sm outline-hidden dark:border-white/10"
+				type="text"
+				autocomplete="off"
+				bind:value={pickerUserDraft.email}
+			/>
+			<label class="text-xs text-gray-500" for="picker-user-avatar">
+				{$i18n.t('settings.admin.authentication.userPickerAvatar.label')}
+			</label>
+			<input
+				id="picker-user-avatar"
+				class="w-full rounded-lg border border-gray-100/50 bg-transparent px-2 py-1.5 text-sm outline-hidden dark:border-white/10"
+				type="text"
+				autocomplete="off"
+				placeholder="https://"
+				bind:value={pickerUserDraft.profile_image_url}
+			/>
+		</div>
+		<div class="mt-4 flex justify-end gap-2">
+			<button
+				class="rounded-full px-3.5 py-1.5 text-sm text-gray-600 hover:bg-gray-100 dark:text-gray-300 dark:hover:bg-gray-800"
+				type="button"
+				on:click={() => {
+					showPickerUserModal = false;
+				}}
+			>
+				{$i18n.t('Cancel')}
+			</button>
+			<button
+				class="rounded-full bg-black px-3.5 py-1.5 text-sm text-white hover:bg-gray-900 dark:bg-white dark:text-black dark:hover:bg-gray-100"
+				type="button"
+				on:click={savePickerUserDraft}
+			>
+				{$i18n.t('Save')}
+			</button>
+		</div>
+	</div>
+</Modal>

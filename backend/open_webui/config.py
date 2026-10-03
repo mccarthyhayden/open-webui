@@ -37,6 +37,7 @@ from open_webui.env import (
 )
 from open_webui.models.config import Config
 from open_webui.utils.json_codec import JSONCodec
+from open_webui.utils.user_picker import normalize_user_picker_users
 
 
 async def seed_registered_defaults():
@@ -1665,6 +1666,20 @@ ENABLE_SIGNUP = False if not WEBUI_AUTH else os.getenv('ENABLE_SIGNUP', 'True').
 
 ENABLE_LOGIN_FORM = os.getenv('ENABLE_LOGIN_FORM', 'True').lower() == 'true'
 
+# User Picker Login is for small trusted or local deployments. Disabled by
+# default so existing login pages stay unchanged. It only pre-selects an
+# email from an admin-configured list; password authentication is unchanged.
+# USER_PICKER_USERS is a JSON list of {name, email, profile_image_url}.
+ENABLE_USER_PICKER_LOGIN = os.getenv('ENABLE_USER_PICKER_LOGIN', 'False').lower() == 'true'
+
+try:
+    USER_PICKER_USERS = JSONCodec.loads(os.getenv('USER_PICKER_USERS', '[]'))
+except Exception as e:
+    log.exception(f'Error loading USER_PICKER_USERS: {e}')
+    USER_PICKER_USERS = []
+
+USER_PICKER_USERS = normalize_user_picker_users(USER_PICKER_USERS)
+
 ENABLE_PASSWORD_CHANGE_FORM = os.getenv('ENABLE_PASSWORD_CHANGE_FORM', 'True').lower() == 'true'
 
 ENABLE_PASSWORD_AUTH = os.getenv('ENABLE_PASSWORD_AUTH', 'True').lower() == 'true'
@@ -3082,6 +3097,8 @@ DEFAULT_CONFIG = {
     'webui.url': WEBUI_URL,
     'ui.enable_signup': ENABLE_SIGNUP,
     'ui.enable_login_form': ENABLE_LOGIN_FORM,
+    'ui.user_picker.enable': ENABLE_USER_PICKER_LOGIN,
+    'ui.user_picker.users': USER_PICKER_USERS,
     'ui.enable_password_change_form': ENABLE_PASSWORD_CHANGE_FORM,
     'ui.default_locale': DEFAULT_LOCALE,
     'ui.default_models': DEFAULT_MODELS,

@@ -78,7 +78,8 @@ from open_webui.utils.groups import apply_default_group_assignment
 from open_webui.utils.json_codec import JSONCodec
 from open_webui.utils.misc import parse_duration, validate_email_format
 from open_webui.utils.rate_limit import RateLimiter
-from pydantic import BaseModel, StrictStr, field_validator
+from open_webui.utils.user_picker import normalize_user_picker_users, validate_user_picker_users
+from pydantic import BaseModel, Field, StrictStr, field_validator
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -106,6 +107,8 @@ ADMIN_CONFIG_KEYS = {
     'ADMIN_EMAIL': 'auth.admin.email',
     'WEBUI_URL': 'webui.url',
     'ENABLE_LOGIN_FORM': 'ui.enable_login_form',
+    'ENABLE_USER_PICKER_LOGIN': 'ui.user_picker.enable',
+    'USER_PICKER_USERS': 'ui.user_picker.users',
     'ENABLE_SIGNUP': 'ui.enable_signup',
     'ENABLE_API_KEYS': 'auth.enable_api_keys',
     'ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS': 'auth.api_key.endpoint_restrictions',
@@ -1203,7 +1206,12 @@ async def get_admin_details(
 
 @router.get('/admin/config')
 async def get_admin_config(request: Request, user=Depends(get_admin_user)):
-    return await get_config_values(ADMIN_CONFIG_KEYS)
+    config = await get_config_values(ADMIN_CONFIG_KEYS)
+    # Admins edit the explicit picker list. Normalize so extra account fields
+    # from a hand-edited config cannot linger in the settings form.
+    config['USER_PICKER_USERS'] = normalize_user_picker_users(config.get('USER_PICKER_USERS'))
+    config['ENABLE_USER_PICKER_LOGIN'] = bool(config.get('ENABLE_USER_PICKER_LOGIN'))
+    return config
 
 
 class AdminConfig(BaseModel):
@@ -1211,6 +1219,9 @@ class AdminConfig(BaseModel):
     ADMIN_EMAIL: str | None = None
     WEBUI_URL: str
     ENABLE_LOGIN_FORM: bool = True
+    # Trusted/local deployments only. Off by default. Does not skip password auth.
+    ENABLE_USER_PICKER_LOGIN: bool = False
+    USER_PICKER_USERS: list[dict] = Field(default_factory=list)
     ENABLE_SIGNUP: bool
     ENABLE_API_KEYS: bool
     ENABLE_API_KEYS_ENDPOINT_RESTRICTIONS: bool
@@ -1239,6 +1250,11 @@ class AdminConfig(BaseModel):
     PENDING_USER_OVERLAY_CONTENT: str | None = None
     RESPONSE_WATERMARK: str | None = None
 
+    @field_validator('USER_PICKER_USERS')
+    @classmethod
+    def validate_picker_users(cls, value):
+        return validate_user_picker_users(value)
+
     @field_validator('I18N')
     @classmethod
     def validate_i18n(cls, value):
@@ -1266,11 +1282,60 @@ class AdminConfig(BaseModel):
         return cleaned
 
 
+async def sign_in_would_be_unavailable(form_data: AdminConfig) -> bool:
+    """Reject a save that would leave no way to sign in.
+
+    Email login can be turned off when User Picker Login has accounts, or when
+    SSO, LDAP, or trusted-header auth is already available.
+    """
+    if not WEBUI_AUTH or WEBUI_AUTH_TRUSTED_EMAIL_HEADER:
+        return False
+
+    if 'ENABLE_LOGIN_FORM' in form_data.model_fields_set:
+        login_form = form_data.ENABLE_LOGIN_FORM
+    else:
+        login_form = bool(await Config.get('ui.enable_login_form'))
+    if login_form:
+        return False
+
+    if 'ENABLE_USER_PICKER_LOGIN' in form_data.model_fields_set:
+        picker_enabled = bool(form_data.ENABLE_USER_PICKER_LOGIN)
+    else:
+        picker_enabled = bool(await Config.get('ui.user_picker.enable'))
+
+    if 'USER_PICKER_USERS' in form_data.model_fields_set:
+        picker_users = form_data.USER_PICKER_USERS or []
+    else:
+        picker_users = normalize_user_picker_users(await Config.get('ui.user_picker.users'))
+
+    if picker_enabled and picker_users:
+        return False
+    if await Config.get('ldap.enable'):
+        return False
+    if await Config.get('oauth.enable'):
+        return False
+    return True
+
+
 @router.post('/admin/config')
 async def update_admin_config(request: Request, form_data: AdminConfig, user=Depends(get_admin_user)):
+    if await sign_in_would_be_unavailable(form_data):
+        raise HTTPException(
+            status.HTTP_400_BAD_REQUEST,
+            detail=(
+                'Leave the login form on until User Picker Login has at least one person, '
+                'or turn on SSO or LDAP first.'
+            ),
+        )
+
     updates = config_updates(form_data.model_dump(), ADMIN_CONFIG_KEYS)
     if 'ENABLE_LOGIN_FORM' not in form_data.model_fields_set:
         updates.pop('ui.enable_login_form', None)
+    # Older admin clients omit these fields. Keep the saved picker config.
+    if 'ENABLE_USER_PICKER_LOGIN' not in form_data.model_fields_set:
+        updates.pop('ui.user_picker.enable', None)
+    if 'USER_PICKER_USERS' not in form_data.model_fields_set:
+        updates.pop('ui.user_picker.users', None)
     if 'I18N' not in form_data.model_fields_set:
         updates.pop('ui.i18n', None)
     updates['ui.default_interface_settings'] = form_data.DEFAULT_INTERFACE_SETTINGS or {}

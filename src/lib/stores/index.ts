@@ -374,6 +374,16 @@ type Config = {
 		};
 		auto_redirect?: boolean;
 	};
+	// Admin-configured login picker. Present on the unauthenticated config response.
+	// Only display name, email, and an optional avatar are included.
+	user_picker?: {
+		enable?: boolean;
+		users?: {
+			name: string;
+			email: string;
+			profile_image_url?: string;
+		}[];
+	};
 	ui?: {
 		default_interface_settings?: Record<string, unknown>;
 		pending_user_overlay_title?: string;
